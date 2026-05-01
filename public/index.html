@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width,initial-scale=1" />
+	<title>Nexmosphere Utility</title>
+	<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+	<header class="topbar">
+		<div class="title">Nexmosphere Utility</div>
+		<div class="status" id="status">connecting…</div>
+		<div class="device-path" id="device-path">—</div>
+		<label class="toggle">
+			<input type="checkbox" id="osc-enabled" />
+			OSC →
+		</label>
+		<input type="text" id="osc-host" placeholder="127.0.0.1" />
+		<input type="number" id="osc-port" placeholder="8000" />
+		<label class="toggle">
+			<input type="checkbox" id="hex-mode" />
+			Hex
+		</label>
+		<label class="toggle">
+			<input type="checkbox" id="paused" />
+			Pause
+		</label>
+		<form id="raw-form" class="raw-form">
+			<input type="text" id="raw-cmd" placeholder="raw command, e.g. X004A[3]" autocomplete="off" />
+			<button type="submit">Send</button>
+		</form>
+	</header>
+
+	<main>
+		<section class="event-log">
+			<div class="section-title">Live events</div>
+			<div id="log"></div>
+		</section>
+		<section class="devices">
+			<div class="section-title">Devices</div>
+			<div id="devices"></div>
+		</section>
+	</main>
+
+	<script src="/app.js"></script>
+</body>
+</html>

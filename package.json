@@ -1,0 +1,16 @@
+{
+  "name": "nexmosphere-utility",
+  "version": "0.1.0",
+  "private": true,
+  "description": "On-site web utility for Nexmosphere XN-series controllers, XT touch buttons, and XR RFID antennas.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "@serialport/parser-regex": "^13.0.0",
+    "osc": "^2.4.5",
+    "serialport": "^12.0.0",
+    "ws": "^8.20.0"
+  }
+}
