@@ -23,6 +23,16 @@ class Registry {
 		return d;
 	}
 
+	// Identity learned from a diagnostic scan rather than from traffic — this is
+	// how an Element that has never been triggered gets into the list at all.
+	describe(addr, { productCode, serial } = {}) {
+		const d = this._get(addr);
+		if (productCode) d.productCode = productCode;
+		if (serial) d.serial = serial;
+		d.discovered = true;
+		return d;
+	}
+
 	promoteType(addr, type) {
 		const d = this._get(addr);
 		// Don't downgrade away from a known type.

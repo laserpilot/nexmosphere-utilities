@@ -1,5 +1,9 @@
 /* Nexmosphere Utility — frontend */
 
+// All-LED masks from the X-Script API manual p.36. The LED byte is a bitfield,
+// two bits per LED — A[3] would be LED 1 only, not "on".
+const LED_MASKS = { off: 0, fast: 85, slow: 170, on: 255 };
+
 const XT_SETTINGS = {
 	4: { kind: 'range', min: 1, max: 253, default: 5, label: 'Lower threshold' },
 	5: { kind: 'range', min: 3, max: 255, default: 110, label: 'Upper threshold' },
@@ -21,6 +25,9 @@ const $$ = (sel) => document.querySelectorAll(sel);
 
 const els = {
 	status: $('#status'),
+	serialStatus: $('#serial-status'),
+	clearHolds: $('#clear-holds'),
+	scan: $('#scan'),
 	devicePath: $('#device-path'),
 	oscEnabled: $('#osc-enabled'),
 	oscHost: $('#osc-host'),
@@ -37,6 +44,10 @@ let ws = null;
 let reconnectTimer = null;
 const cards = new Map(); // addr -> card DOM helpers
 const pendingTouchClass = new Map(); // addr -> timeout id
+
+// What the server is holding on our behalf and will re-send after every
+// controller power cycle. The controller itself stores nothing.
+let held = { leds: {}, settings: {} };
 
 function connect() {
 	const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -63,10 +74,23 @@ function send(obj) {
 
 function onMessage(msg) {
 	if (msg.type === 'snapshot') {
-		els.devicePath.textContent = msg.devicePath || '—';
+		applyLink(msg.link || {});
 		applyOscConfig(msg.osc);
+		held = msg.held || held;
 		(msg.devices || []).forEach(ensureCard);
 		(msg.devices || []).forEach((d) => updateCardLast(d.addr, d));
+		refreshHeld();
+		return;
+	}
+	if (msg.type === 'link') { applyLink(msg); return; }
+	if (msg.type === 'device') { onDevice(msg); return; }
+	if (msg.type === 'scan') { onScan(msg); return; }
+	if (msg.type === 'held') { held = msg.held || { leds: {}, settings: {} }; refreshHeld(); return; }
+	if (msg.type === 'replay') {
+		const text = msg.phase === 'scheduled'
+			? `holding ${msg.count} command(s) — replaying in ${Math.round(msg.delay / 1000)}s (XT calibration window)`
+			: `replayed ${msg.count} held command(s)`;
+		logLine('replay', text, msg.ts);
 		return;
 	}
 	if (msg.type === 'osc_config') { applyOscConfig(msg.osc); return; }
@@ -74,8 +98,84 @@ function onMessage(msg) {
 	if (msg.type === 'raw')   { if (els.hexMode.checked) logLine('raw', `RAW ${msg.len}b: ${msg.hex}`, msg.ts); return; }
 	if (msg.type === 'touch') { onTouch(msg); return; }
 	if (msg.type === 'rfid')  { onRfid(msg); return; }
-	if (msg.type === 'sent')  { logLine('sent', `>> ${msg.cmd}  (${msg.reason})`, msg.ts); return; }
+	if (msg.type === 'sent')  { logLine('sent', `>> ${msg.cmd}${msg.reason ? `  (${msg.reason})` : ''}`, msg.ts); return; }
 	if (msg.type === 'error') { logLine('error', `ERR: ${msg.message}`, msg.ts); return; }
+}
+
+// A diagnostic reply told us what is on a channel. This is the path that puts a
+// device on screen without anyone having triggered it.
+function onDevice(msg) {
+	ensureCard({ addr: msg.addr, type: msg.deviceType || 'unknown' });
+	const c = cards.get(msg.addr);
+	if (!c) return;
+	if (msg.productCode) c.productCode = msg.productCode;
+	if (msg.serial) c.serial = msg.serial;
+	if (c.identity) {
+		c.identity.textContent = [c.productCode, c.serial && `SN ${c.serial}`].filter(Boolean).join(' · ');
+		c.identity.hidden = !c.identity.textContent;
+	}
+	if (c.badge && c.productCode) c.badge.textContent = c.productCode;
+}
+
+function onScan(msg) {
+	if (msg.phase === 'scheduled') {
+		logLine('scan', `scan scheduled in ${Math.round(msg.delay / 1000)}s (XT calibration window)`, msg.ts);
+		return;
+	}
+	if (msg.phase === 'start') {
+		els.scan.disabled = true;
+		logLine('scan', `scanning X-talk channels 1-${msg.addresses} (${msg.reason})…`, msg.ts);
+		return;
+	}
+	els.scan.disabled = false;
+	logLine('scan', `scan found ${msg.found} element(s)${msg.added ? `, ${msg.added} new` : ''}`, msg.ts);
+	(msg.devices || []).forEach((d) => onDevice({
+		addr: d.addr, deviceType: d.type, productCode: d.productCode, serial: d.serial,
+	}));
+}
+
+// The serial link is separate from the browser's websocket: the page can be
+// happily connected while the controller is unplugged.
+function applyLink(info) {
+	if (info.connected) {
+		els.serialStatus.textContent = 'serial: connected';
+		els.serialStatus.dataset.state = 'open';
+		els.scan.disabled = false;
+		if (info.path) els.devicePath.textContent = info.path;
+		return;
+	}
+	els.serialStatus.textContent = info.retryIn
+		? `serial: reconnecting in ${Math.round(info.retryIn / 1000)}s`
+		: 'serial: disconnected';
+	els.serialStatus.dataset.state = 'closed';
+	els.scan.disabled = true;
+	if (info.reason) els.devicePath.textContent = info.reason;
+}
+
+// Mark which LED state each address is pinned to, so it is obvious what will
+// come back after a power cycle.
+function refreshHeld() {
+	const anyHeld = Object.keys(held.leds || {}).length > 0 || Object.keys(held.settings || {}).length > 0;
+	els.clearHolds.disabled = !anyHeld;
+
+	for (const [addr, c] of cards) {
+		const ledHold = (held.leds || {})[addr];
+		if (c.ledButtons) {
+			for (const [state, btn] of c.ledButtons) {
+				btn.classList.toggle('held', Boolean(ledHold) && LED_MASKS[state] === ledHold.mask);
+			}
+		}
+		if (!c.heldLine) continue;
+		const parts = [];
+		if (ledHold) parts.push(`LED ${ledHold.cmd}`);
+		const settingHold = (held.settings || {})[addr];
+		if (settingHold) {
+			for (const [n, s] of Object.entries(settingHold)) parts.push(`S${n}=${s.value}`);
+		}
+		c.heldLine.textContent = parts.length ? `held: ${parts.join(', ')} — re-sent on reconnect` : '';
+		c.heldLine.hidden = parts.length === 0;
+		c.clearHold.hidden = parts.length === 0;
+	}
 }
 
 function applyOscConfig(cfg) {
@@ -158,9 +258,18 @@ function rebuildCard(addr, type) {
 	h.appendChild(hText);
 	const badge = document.createElement('span');
 	badge.className = `badge ${type}`;
-	badge.textContent = type;
+	badge.textContent = c.productCode || type;
 	h.appendChild(badge);
+	c.badge = badge;
 	c.root.appendChild(h);
+
+	// Product code and serial, when a diagnostic scan has told us.
+	const identity = document.createElement('div');
+	identity.className = 'identity';
+	identity.textContent = [c.productCode, c.serial && `SN ${c.serial}`].filter(Boolean).join(' · ');
+	identity.hidden = !identity.textContent;
+	c.root.appendChild(identity);
+	c.identity = identity;
 
 	const last = document.createElement('div');
 	last.className = 'last';
@@ -168,23 +277,45 @@ function rebuildCard(addr, type) {
 	c.root.appendChild(last);
 	c.last = last;
 
+	const heldLine = document.createElement('div');
+	heldLine.className = 'held-line';
+	heldLine.hidden = true;
+	c.root.appendChild(heldLine);
+	c.heldLine = heldLine;
+
+	const clearHold = document.createElement('button');
+	clearHold.className = 'action';
+	clearHold.textContent = 'Clear hold';
+	clearHold.hidden = true;
+	clearHold.addEventListener('click', () => send({ action: 'clear_hold', addr }));
+	heldLine.appendChild(document.createTextNode(' '));
+	c.root.appendChild(clearHold);
+	c.clearHold = clearHold;
+
+	c.ledButtons = null;
+
 	if (type === 'xtouch') buildXTouch(c, addr);
 	else if (type === 'rfid') buildRfid(c, addr);
 	else buildUnknown(c, addr);
+
+	refreshHeld();
 }
 
 function buildXTouch(c, addr) {
 	// LED row
 	const led = document.createElement('div');
 	led.className = 'group';
-	led.innerHTML = '<div class="group-label">LED</div>';
+	led.innerHTML = '<div class="group-label">LED (held — re-sent after every power cycle)</div>';
 	const row = document.createElement('div');
 	row.className = 'led-row';
+	c.ledButtons = new Map();
 	['off', 'fast', 'slow', 'on'].forEach((state) => {
 		const btn = document.createElement('button');
 		btn.className = 'action';
 		btn.textContent = state.toUpperCase();
+		btn.title = `X${String(addr).padStart(3, '0')}A[${LED_MASKS[state]}] — all four LEDs`;
 		btn.addEventListener('click', () => send({ action: 'led', addr, state }));
+		c.ledButtons.set(state, btn);
 		row.appendChild(btn);
 	});
 	led.appendChild(row);
@@ -193,7 +324,7 @@ function buildXTouch(c, addr) {
 	// Sensitivity settings
 	const settings = document.createElement('div');
 	settings.className = 'group';
-	settings.innerHTML = '<div class="group-label">Sensitivity (resets on power cycle)</div>';
+	settings.innerHTML = '<div class="group-label">Sensitivity (held — re-sent after every power cycle)</div>';
 	for (const n of [4, 5, 6]) settings.appendChild(buildSettingRow(addr, 'xtouch', n, XT_SETTINGS[n]));
 	c.root.appendChild(settings);
 }
@@ -201,7 +332,7 @@ function buildXTouch(c, addr) {
 function buildRfid(c, addr) {
 	const settings = document.createElement('div');
 	settings.className = 'group';
-	settings.innerHTML = '<div class="group-label">RFID settings (resets on power cycle)</div>';
+	settings.innerHTML = '<div class="group-label">RFID settings (held — re-sent after every power cycle)</div>';
 	for (const n of [1, 4, 5, 6]) settings.appendChild(buildSettingRow(addr, 'rfid', n, RFID_SETTINGS[n]));
 	c.root.appendChild(settings);
 }
@@ -314,6 +445,9 @@ function pushOscConfig() {
 els.oscEnabled.addEventListener('change', pushOscConfig);
 els.oscHost.addEventListener('change', pushOscConfig);
 els.oscPort.addEventListener('change', pushOscConfig);
+
+els.clearHolds.addEventListener('click', () => send({ action: 'clear_hold' }));
+els.scan.addEventListener('click', () => send({ action: 'scan' }));
 
 els.rawForm.addEventListener('submit', (e) => {
 	e.preventDefault();

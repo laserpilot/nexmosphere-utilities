@@ -10,7 +10,10 @@
 	<header class="topbar">
 		<div class="title">Nexmosphere Utility</div>
 		<div class="status" id="status">connecting…</div>
+		<div class="status" id="serial-status" title="Serial link to the Nexmosphere controller">serial: —</div>
 		<div class="device-path" id="device-path">—</div>
+		<button type="button" id="scan" class="action" title="Ask every X-talk channel what is connected, without triggering anything">Scan</button>
+		<button type="button" id="clear-holds" class="action" title="Stop re-asserting all held LED states and settings">Clear holds</button>
 		<label class="toggle">
 			<input type="checkbox" id="osc-enabled" />
 			OSC →

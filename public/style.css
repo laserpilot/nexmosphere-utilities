@@ -126,6 +126,8 @@ main {
 .row.sent          { color: var(--purple); }
 .row.raw           { color: var(--fg-dim); }
 .row.error         { color: var(--red); }
+.row.replay        { color: var(--yellow); }
+.row.scan          { color: var(--blue); }
 
 #devices {
 	overflow-y: auto;
@@ -188,6 +190,29 @@ button.action {
 }
 button.action:hover { background: var(--bg); }
 button.action.primary { border-color: var(--accent); color: var(--accent); }
+button.action:disabled { opacity: 0.4; cursor: default; }
+button.action:disabled:hover { background: var(--bg-2); }
+
+/* The LED state this address is pinned to and will be re-sent after a power
+   cycle. The controller stores nothing, so this is the only record of it. */
+button.action.held {
+	border-color: var(--yellow);
+	color: var(--yellow);
+	background: rgba(210, 153, 34, 0.12);
+}
+
+.card .identity {
+	color: var(--fg-dim);
+	font-size: 11px;
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	margin-bottom: 4px;
+}
+
+.card .held-line {
+	color: var(--yellow);
+	font-size: 11px;
+	margin-bottom: 6px;
+}
 
 .setting-row {
 	display: grid;
