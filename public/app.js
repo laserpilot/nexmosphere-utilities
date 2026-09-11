@@ -20,6 +20,33 @@ const RFID_SETTINGS = {
 	6: { kind: 'range', min: 1, max: 20, default: 2, label: 'Filter level' },
 };
 
+// XR2 NFC drivers (XR-DR2 / XR-DW2), API manual p.17. 1/4/5/6 mirror the XR1
+// driver; 9 and 10 are new. The manual misprints every setting-10 option as
+// "10:1" — the values are 1-8 in the order listed.
+const NFC_SETTINGS = {
+	1: { kind: 'enum', default: 3, label: 'Status LED behavior',
+		values: { 1: 'On', 2: 'Off', 3: 'On / off when tag', 4: 'Off / on when tag' } },
+	4: { kind: 'enum', default: 3, label: 'Gain level',
+		values: { 1: '23 dB', 2: '33 dB', 3: '38 dB (default)', 4: '43 dB', 5: '48 dB (max)' } },
+	5: { kind: 'enum', default: 1, label: 'Interference indicator',
+		values: { 1: 'Level 3 only', 2: 'All levels', 3: 'Off' } },
+	6: { kind: 'range', min: 1, max: 20, default: 2, label: 'Filter level' },
+	9: { kind: 'enum', default: 1, label: 'Trigger mode',
+		values: { 1: 'Detect + remove', 2: 'Detect only', 3: 'Remove only', 4: 'No triggers' } },
+	10: { kind: 'enum', default: 1, label: 'Output format',
+		values: { 1: 'UID', 2: 'Tag number', 3: 'Label 1', 4: 'Label 2', 5: 'Label 3',
+			6: 'UID + nr + label 1', 7: 'Label 1+2+3', 8: 'Custom' } },
+};
+
+// Writable tag fields. The UID is burned into the chip, so it is read-only.
+const NFC_FIELDS = [
+	{ key: 'uid', label: 'UID', writable: false },
+	{ key: 'tnr', label: 'Tag nr', writable: true, placeholder: '1-65535' },
+	{ key: 'lb1', label: 'Label 1', writable: true, placeholder: '16 chars max' },
+	{ key: 'lb2', label: 'Label 2', writable: true, placeholder: '16 chars max' },
+	{ key: 'lb3', label: 'Label 3', writable: true, placeholder: '16 chars max' },
+];
+
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 
@@ -98,6 +125,7 @@ function onMessage(msg) {
 	if (msg.type === 'raw')   { if (els.hexMode.checked) logLine('raw', `RAW ${msg.len}b: ${msg.hex}`, msg.ts); return; }
 	if (msg.type === 'touch') { onTouch(msg); return; }
 	if (msg.type === 'rfid')  { onRfid(msg); return; }
+	if (msg.type === 'nfc')   { onNfc(msg); return; }
 	if (msg.type === 'sent')  { logLine('sent', `>> ${msg.cmd}${msg.reason ? `  (${msg.reason})` : ''}`, msg.ts); return; }
 	if (msg.type === 'error') { logLine('error', `ERR: ${msg.message}`, msg.ts); return; }
 }
@@ -214,6 +242,30 @@ function onRfid(msg) {
 	updateCardLast(msg.addr, { type: 'rfid', lastSeen: msg.ts, lastTag: msg.tag, lastEvt: msg.action });
 }
 
+// A tag event and a reply to a data request arrive in the same shape, so both
+// land here — on site you usually cannot tell them apart either, and the value
+// is what matters.
+function onNfc(msg) {
+	const text = describeFields(msg.fields);
+	logLine('nfc', `${msg.action.toUpperCase()} addr=${msg.addr} ${text}`, msg.ts);
+	ensureCard({ addr: msg.addr, type: 'nfc', lastSeen: msg.ts });
+	updateCardLast(msg.addr, { type: 'nfc', lastSeen: msg.ts, lastEvt: msg.action, fields: msg.fields });
+	const c = cards.get(msg.addr);
+	if (c && c.tagLine) {
+		c.tagLine.textContent = text;
+		c.tagLine.hidden = !text;
+	}
+	flashTouch(msg.addr, msg.action === 'detected');
+}
+
+function describeFields(fields) {
+	const labels = { uid: 'UID', tnr: 'nr', lb1: 'L1', lb2: 'L2', lb3: 'L3' };
+	return Object.keys(labels)
+		.filter((k) => (fields || {})[k] !== undefined)
+		.map((k) => `${labels[k]}=${fields[k] || '(empty)'}`)
+		.join('  ');
+}
+
 function flashTouch(addr, on) {
 	const card = cards.get(addr);
 	if (!card) return;
@@ -294,8 +346,11 @@ function rebuildCard(addr, type) {
 
 	c.ledButtons = null;
 
+	c.tagLine = null;
+
 	if (type === 'xtouch') buildXTouch(c, addr);
 	else if (type === 'rfid') buildRfid(c, addr);
+	else if (type === 'nfc') buildNfc(c, addr);
 	else buildUnknown(c, addr);
 
 	refreshHeld();
@@ -335,6 +390,121 @@ function buildRfid(c, addr) {
 	settings.innerHTML = '<div class="group-label">RFID settings (held — re-sent after every power cycle)</div>';
 	for (const n of [1, 4, 5, 6]) settings.appendChild(buildSettingRow(addr, 'rfid', n, RFID_SETTINGS[n]));
 	c.root.appendChild(settings);
+}
+
+function buildNfc(c, addr) {
+	const a3 = String(addr).padStart(3, '0');
+	const nfcSend = (op, params, confirmText) => {
+		if (confirmText && !window.confirm(confirmText)) return false;
+		send({ action: 'nfc', op, addr, confirm: true, ...params });
+		return true;
+	};
+
+	// Whatever the last tag event or data request reported, in full. The card's
+	// "last:" line only has room for one field.
+	const tagLine = document.createElement('div');
+	tagLine.className = 'tag-line';
+	tagLine.hidden = true;
+	c.root.appendChild(tagLine);
+	c.tagLine = tagLine;
+
+	// Read — safe, and the only way to see a tag when trigger mode is 4.
+	const read = document.createElement('div');
+	read.className = 'group';
+	read.innerHTML = '<div class="group-label">Read tag (reply arrives as an event)</div>';
+	const readRow = document.createElement('div');
+	readRow.className = 'led-row';
+	for (const f of NFC_FIELDS) {
+		const btn = document.createElement('button');
+		btn.className = 'action';
+		btn.textContent = f.label;
+		btn.title = `X${a3}B[${f.key.toUpperCase()}?]`;
+		btn.addEventListener('click', () => nfcSend('request', { field: f.key }));
+		readRow.appendChild(btn);
+	}
+	read.appendChild(readRow);
+	c.root.appendChild(read);
+
+	// Write — one-off, never held: replaying a tag write on every reconnect
+	// would stamp whatever tag happens to be sitting on the antenna.
+	const write = document.createElement('div');
+	write.className = 'group';
+	write.innerHTML = '<div class="group-label">Write to the tag on the antenna (not held)</div>';
+	for (const f of NFC_FIELDS.filter((x) => x.writable)) {
+		const row = document.createElement('div');
+		row.className = 'write-row';
+		const label = document.createElement('label');
+		label.textContent = f.label;
+		const input = document.createElement('input');
+		input.type = 'text';
+		input.placeholder = f.placeholder;
+		if (f.key !== 'tnr') input.maxLength = 16;
+		const btn = document.createElement('button');
+		btn.className = 'action primary';
+		btn.textContent = 'Write';
+		const submit = () => {
+			if (!input.value.trim() && f.key === 'tnr') return;
+			nfcSend('write', { field: f.key, value: f.key === 'tnr' ? Number(input.value) : input.value });
+		};
+		btn.addEventListener('click', submit);
+		input.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+		row.append(label, input, btn);
+		write.appendChild(row);
+	}
+	c.root.appendChild(write);
+
+	// Settings behave like every other Element setting: lost on power cycle,
+	// so they are held and replayed.
+	const settings = document.createElement('div');
+	settings.className = 'group';
+	settings.innerHTML = '<div class="group-label">NFC settings (held — re-sent after every power cycle)</div>';
+	for (const n of [1, 4, 5, 6, 9, 10]) settings.appendChild(buildSettingRow(addr, 'nfc', n, NFC_SETTINGS[n]));
+	c.root.appendChild(settings);
+
+	// Everything below here changes the tag itself, not the reader, and several
+	// of them cannot be undone — hence the confirmations.
+	const danger = document.createElement('div');
+	danger.className = 'group';
+	danger.innerHTML = '<div class="group-label danger-label">Tag maintenance — destructive</div>';
+	const dangerRow = document.createElement('div');
+	dangerRow.className = 'led-row';
+	const dangerOps = [
+		['Erase all', 'erase', { scope: 'all' }, 'Erase the tag number AND all labels on the tag currently on the antenna?'],
+		['Erase tag nr', 'erase', { scope: 'tagnr' }, 'Erase the tag number on the tag currently on the antenna?'],
+		['Erase labels', 'erase', { scope: 'labels' }, 'Erase all three labels on the tag currently on the antenna?'],
+		['Format NTAG', 'format', {}, 'Format the NTAG chip on the antenna? This wipes all NDEF data and cannot be undone.'],
+		['Lock', 'lock', {}, 'Lock the tag with the password set on this reader? A locked tag needs the same password to unlock.'],
+		['Unlock', 'unlock', {}, 'Unlock the tag using the password set on this reader?'],
+		['Reload NDEF', 'reload', {}, null],
+	];
+	for (const [text, op, params, confirmText] of dangerOps) {
+		const btn = document.createElement('button');
+		btn.className = confirmText ? 'action danger' : 'action';
+		btn.textContent = text;
+		btn.addEventListener('click', () => nfcSend(op, params, confirmText));
+		dangerRow.appendChild(btn);
+	}
+	danger.appendChild(dangerRow);
+
+	const pwRow = document.createElement('div');
+	pwRow.className = 'write-row';
+	const pwLabel = document.createElement('label');
+	pwLabel.textContent = 'Password';
+	const pwInput = document.createElement('input');
+	pwInput.type = 'text';
+	pwInput.placeholder = '8 hex chars';
+	pwInput.maxLength = 8;
+	const pwBtn = document.createElement('button');
+	pwBtn.className = 'action danger';
+	pwBtn.textContent = 'Set';
+	pwBtn.addEventListener('click', () => {
+		if (!pwInput.value.trim()) return;
+		nfcSend('password', { password: pwInput.value.trim() },
+			'Set the lock password on this reader? Lose it and a locked tag stays locked.');
+	});
+	pwRow.append(pwLabel, pwInput, pwBtn);
+	danger.appendChild(pwRow);
+	c.root.appendChild(danger);
 }
 
 function buildUnknown(c, addr) {
@@ -426,6 +596,9 @@ function updateCardLast(addr, info) {
 		c.last.textContent = `last: ${info.lastEvt || '—'} (${btn}) ${ago}`;
 	} else if (info.type === 'rfid') {
 		c.last.textContent = `last: ${info.lastEvt || '—'} tag ${info.lastTag ?? '—'} ${ago}`;
+	} else if (info.type === 'nfc') {
+		const what = describeFields(info.fields) || '—';
+		c.last.textContent = `last: ${info.lastEvt || '—'} ${what} ${ago}`;
 	} else {
 		c.last.textContent = `last seen: ${ago}`;
 	}

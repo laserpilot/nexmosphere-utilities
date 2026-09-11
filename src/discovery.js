@@ -42,7 +42,10 @@ function parseDiagnostic(line) {
 function deviceTypeFor(productCode) {
 	const code = String(productCode || '').toUpperCase();
 	if (/^XT-?[14]/.test(code)) return 'xtouch'; // XT-1xx / XT-4xx touch boards
-	if (/^XR/.test(code)) return 'rfid'; // XR antenna drivers
+	// XR-DR2 / XR-DW2 are NFC drivers and speak a different protocol to the
+	// XR-DR1 antenna driver, so they must be matched before the generic XR rule.
+	if (/^XR-?D[RW]2/.test(code)) return 'nfc';
+	if (/^XR/.test(code)) return 'rfid'; // XR-DR1 antenna driver
 	return 'unknown';
 }
 

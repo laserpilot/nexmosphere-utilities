@@ -1,6 +1,6 @@
 # Nexmosphere Utility
 
-A small on-site web tool for testing and configuring Nexmosphere XN-series controllers, XT touch buttons, and XR RFID antennas. Plug the controller into USB, run `npm start`, open the URL it prints. Live event stream on the left, per-device controls on the right.
+A small on-site web tool for testing and configuring Nexmosphere XN-series controllers, XT touch buttons, XR RFID antennas, and XR2 NFC drivers. Plug the controller into USB, run `npm start`, open the URL it prints. Live event stream on the left, per-device controls on the right.
 
 ![Nexmosphere Utility — live event log on the left, XT touch + XR RFID device cards on the right](./screenshots/utility.png)
 
@@ -9,6 +9,7 @@ A small on-site web tool for testing and configuring Nexmosphere XN-series contr
 - **XN-145** USB X-Talk interface — Prolific PL2303 (vendor `0x067B`).
 - **XT-1GW6** large single-button capacitive touch (with LED).
 - **XR-DR1** RFID driver + **XR-A50** antenna (parser scaffolded; format matches the Nexmosphere "XR Range RFID" manual, see `docs/`).
+- **XR-DR2** / **XR-DW2** NFC drivers (parser and command set built from the X-Script API manual p.17, see `docs/` — not yet bench-tested against hardware).
 
 The auto-detect heuristic also accepts FTDI, Silicon Labs CP210x, and WCH CH340 USB-serial chips by vendor ID.
 
@@ -79,8 +80,13 @@ unplugged, power-cycled, or enumerates under a different tty node.
 - **XT card** (per address that emits touch events):
   - **LED control**: Off / Fast blink / Slow blink / On, applied to all four LEDs. The active state is highlighted and **held** — see below.
   - **Sensitivity**: settings 4 (lower threshold), 5 (upper threshold), 6 (trigger time × 20ms). Slide and click Apply.
-- **RFID card** (per antenna address):
+- **RFID card** (XR-DR1, per antenna address):
   - **Status LED behavior**, **antenna gain** (5 levels), **interference indicator**, **filter level** (1–20).
+- **NFC card** (XR-DR2 / XR-DW2):
+  - **Read tag**: request UID, tag number, or any of the three text labels. The reply arrives as a normal event — which is also the only way to see a tag when trigger mode is set to "no triggers".
+  - **Write tag**: set the tag number (1–65535) or labels 1–3 (16 ASCII characters each) on whatever tag is on the antenna. The UID is burned into the chip and is read-only.
+  - **Settings**: status LED behavior, gain, interference indicator, filter level, plus **trigger mode** (setting 9) and **output format** (setting 10) — held, like every other setting.
+  - **Tag maintenance**: erase (all / tag number / labels), format NTAG, set the lock password, lock, unlock, reload NDEF. Each destructive button confirms first, and the server refuses these commands unless the confirmation came with them.
 - **Raw send**: textbox at the top accepts arbitrary X-Talk commands like `X004A[3]`. Deliberately *not* held — a raw command is a one-off probe.
 - **Clear holds**: drops every held LED state and setting so nothing is re-asserted. Each card also has its own **Clear hold**.
 
@@ -99,8 +105,8 @@ D001B[SERIAL]    ->  D001B[SERIAL=11844_22-014-21 ]
 A scan probes `D001B[TYPE]` through `D008B[TYPE]` (8 covers every XN model), then
 asks for serial numbers from only the channels that answered. Cards appear with
 the product code and serial filled in, and the product code prefix picks the card
-type — `XT-1xx`/`XT-4xx` → touch, `XR…` → RFID, anything else gets a card
-labelled with its raw code.
+type — `XT-1xx`/`XT-4xx` → touch, `XR-DR2`/`XR-DW2` → NFC, other `XR…` → RFID,
+anything else gets a card labelled with its raw code.
 
 A scan runs automatically after every connect (after the calibration wait, before
 held state is replayed), and the **Scan** button in the top bar re-runs it.
@@ -177,6 +183,7 @@ src/
   devices/
     xtouch.js       parse touch + format LED/settings commands
     rfid.js         pair XR[PU/PB] with X<addr>A[1/0]; format settings
+    nfc.js          XR2 NFC: parse X<addr>B[TD=…]; read/write/erase tag commands
 public/
   index.html  app.js  style.css
 docs/
@@ -196,6 +203,10 @@ docs/
 - **Command spacing**: leave 50–100ms between consecutive control commands or one can be dropped (API manual p.11). This app queues every write and paces it at 75ms.
 - **Diagnostics**: `D<addr>B[TYPE]` and `D<addr>B[SERIAL]` report what is connected to a channel without triggering it. Replies come back padded inside the brackets (`D001B[TYPE=XY146 ]`), so trim before comparing.
 - **Detecting a dead link**: node-serialport does not surface a vanished device on the read side — `isOpen` keeps returning true until the next *write* fails. This app also watches for the tty node to disappear (every 2s), which catches an unplug or power cycle while idle.
+- **NFC tag events** (XR-DR2 / XR-DW2): one line, `X<addr>B[TD=<FIELD>:<value>]` for detected and `TR=` for removed. Which field arrives depends on setting 10 (output format): `UID`, `TNR`, `LB1`–`LB3`, or several at once for formats 6 and 7. The manual prints no combined example, so this app finds each `UID:`/`TNR:`/`LB1:` key in the payload and takes everything up to the next one — separator-agnostic. Values arrive space-padded to their fixed width, so trim.
+  - A reply to a data request (`X<addr>B[UID?]`) comes back in exactly the same shape as a tag event; there is no way to tell them apart from the line alone.
+  - The Q4 2025 manual prints every option of setting 10 as `X001S[10:1]`. The values are 1–8 in the order listed.
+  - Do not confuse this with the XR-DR1 driver: same `XR` product prefix, completely different protocol. `X<addr>B[…]` on an XR-DR1 is a *status reply* (`X001B[ d004 d002 d000 d000]`), which is why the NFC parser insists on a `TD=`/`TR=` payload.
 - **RFID pickup**: two consecutive lines — `XR[PU<nnn>]` then `X<addr>A[1]`. Placeback: `XR[PB<nnn>]` then `X<addr>A[0]`. The antenna line shares format with touch release, which is why this app pairs them with a 500 ms window before deciding which device fired.
 
 ## Acknowledgements

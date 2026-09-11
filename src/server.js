@@ -10,6 +10,7 @@ const { DesiredState } = require('./desired-state');
 const discovery = require('./discovery');
 const xtouch = require('./devices/xtouch');
 const rfid = require('./devices/rfid');
+const nfc = require('./devices/nfc');
 const { createOscSender } = require('./osc-out');
 
 function parseArgs(argv) {
@@ -186,6 +187,19 @@ async function main() {
 			return;
 		}
 
+		// XR2 NFC drivers (XR-DR2 / XR-DW2). X<addr>B[TD=…] is theirs alone: the
+		// XR-DR1 status reply shares the X<addr>B[…] envelope but never carries
+		// a TD=/TR= payload. A data-request reply arrives in the same shape as a
+		// tag event, which is why both land here.
+		const tag = nfc.parseTrigger(line);
+		if (tag) {
+			registry.promoteType(tag.addr, 'nfc');
+			registry.record(tag.addr, { evt: tag.action, value: tag.primary, fields: tag.fields });
+			broadcast({ type: 'nfc', addr: tag.addr, action: tag.action, fields: tag.fields, primary: tag.primary, ts: Date.now() });
+			oscSender.send(`/nexmosphere/${tag.addr}/${tag.action}`, ...nfc.fieldValues(tag.fields));
+			return;
+		}
+
 		const paired = pairer.feed(line);
 		if (paired && (paired.kind === 'rfid_picked' || paired.kind === 'rfid_placed')) {
 			const addr = paired.addr;
@@ -274,11 +288,26 @@ async function main() {
 				return;
 			}
 			if (msg.action === 'setting') {
-				const fmt = msg.deviceType === 'rfid' ? rfid.cmdSetting : xtouch.cmdSetting;
+				const formatters = { rfid: rfid.cmdSetting, nfc: nfc.cmdSetting, xtouch: xtouch.cmdSetting };
+				const fmt = formatters[msg.deviceType] || xtouch.cmdSetting;
 				const cmd = fmt(msg.addr, msg.n, msg.v);
 				desired.setSetting(msg.addr, msg.n, msg.deviceType, msg.v, cmd);
 				broadcastHeld();
 				sendHeld(cmd, `setting ${msg.n}=${msg.v} on ${msg.addr}`, ws);
+				return;
+			}
+			// Tag operations are one-offs against whatever tag is on the antenna
+			// right now, so unlike settings they are never held or replayed —
+			// re-formatting a tag on every reconnect would be a disaster.
+			if (msg.action === 'nfc') {
+				if (nfc.DESTRUCTIVE_OPS.has(msg.op) && msg.confirm !== true) {
+					ws.send(JSON.stringify({ type: 'error', message: `NFC ${msg.op} needs an explicit confirmation`, ts: Date.now() }));
+					return;
+				}
+				const cmd = nfc.command(msg.op, msg.addr, msg);
+				if (!link.send(cmd, { reason: `nfc ${msg.op} on ${msg.addr}` })) {
+					ws.send(JSON.stringify({ type: 'error', message: `serial disconnected — ${cmd} dropped`, ts: Date.now() }));
+				}
 				return;
 			}
 			if (msg.action === 'scan') {
